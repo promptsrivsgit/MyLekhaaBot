@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>บันทึกกลั่นกรองเอกสารเสนอผู้บริหาร - {{ report.title }}</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Sarabun', sans-serif; }
+        @media print {
+            .no-print { display: none; }
+            body { background: white; color: black; }
+        }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-800 min-h-screen pb-12">
+    <!-- Header bar -->
+    <header class="bg-white border-b border-slate-200 sticky top-0 z-10 shadow-sm no-print">
+        <div class="max-w-4xl mx-auto px-4 py-3 flex items-center justify-between">
+            <div class="flex items-center space-x-2">
+                <span class="text-xl font-bold bg-gradient-to-r from-blue-600 to-indigo-600 bg-clip-text text-transparent">
+                    YES BOSS
+                </span>
+                <span class="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full font-medium">Executive Legal Screener</span>
+            </div>
+            <button onclick="window.print()" class="bg-indigo-600 hover:bg-indigo-700 text-white text-sm px-3 py-1.5 rounded-lg flex items-center shadow-sm transition">
+                🖨️ พิมพ์ / บันทึก PDF
+            </button>
+        </div>
+    </header>
+
+    <main class="max-w-4xl mx-auto px-4 mt-6">
+        <!-- Title & Meta Card -->
+        <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 md:p-8 mb-6">
+            <div class="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-5 mb-5">
+                <div>
+                    <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">บันทึกกลั่นกรองเอกสารและสัญญา</span>
+                    <h1 class="text-2xl md:text-3xl font-bold text-slate-900 mt-1">{{ report.title }}</h1>
+                    <p class="text-sm text-slate-500 mt-1">ไฟล์ต้นฉบับ: <span class="font-medium text-slate-700">{{ report.original_filename }}</span> | วันที่ตรวจ: {{ report.created_at }}</p>
+                </div>
+                <div>
+                    {% if "สูง" in report.risk_level or "วิกฤต" in report.risk_level or "High" in report.risk_level %}
+                    <span class="inline-flex items-center px-3 py-1.5 rounded-full text-sm font-semibold bg-red-100 text-red-700 border border-red-200">
+                        ⚠️ ระดับความเสี่ยง: {{ report.risk_level }}
+                    </span>
+                    {% elif "ปานกลาง" in report.risk_level or "Medium" in report.risk_level %}
+                    <span class="inline-flex items-center px-3 py-1.5 rounded-full text-sm font-semibold bg-amber-100 text-amber-800 border border-amber-200">
+                        ⚡ ระดับความเสี่ยง: {{ report.risk_level }}
+                    </span>
+                    {% else %}
+                    <span class="inline-flex items-center px-3 py-1.5 rounded-full text-sm font-semibold bg-emerald-100 text-emerald-700 border border-emerald-200">
+                        ✅ ระดับความเสี่ยง: {{ report.risk_level }}
+                    </span>
+                    {% endif %}
+                </div>
+            </div>
+
+            <!-- Executive Summary (1-Page) -->
+            <div class="mb-8">
+                <h2 class="text-lg font-bold text-slate-900 flex items-center mb-3 text-blue-900">
+                    <span class="w-2 h-6 bg-blue-600 rounded-full mr-2"></span>
+                    1. สรุปสาระสำคัญเสนอผู้บริหาร (Executive Brief)
+                </h2>
+                <div class="bg-slate-50 rounded-xl p-5 border border-slate-100 text-slate-700 leading-relaxed whitespace-pre-line text-base">
+{{ report.executive_summary }}
+                </div>
+            </div>
+
+            <!-- Legal Analysis & Red Flags -->
+            <div class="mb-8">
+                <h2 class="text-lg font-bold text-slate-900 flex items-center mb-3 text-indigo-900">
+                    <span class="w-2 h-6 bg-indigo-600 rounded-full mr-2"></span>
+                    2. การกลั่นกรองข้อกฎหมายและจุดเสี่ยง (Legal & Red Flags Analysis)
+                </h2>
+                <div class="bg-indigo-50/50 rounded-xl p-5 border border-indigo-100/70 text-slate-800 leading-relaxed whitespace-pre-line text-base">
+{{ report.legal_analysis }}
+                </div>
+            </div>
+
+            <!-- Action Items / Next Steps -->
+            <div>
+                <h2 class="text-lg font-bold text-slate-900 flex items-center mb-3 text-emerald-900">
+                    <span class="w-2 h-6 bg-emerald-600 rounded-full mr-2"></span>
+                    3. ข้อเสนอแนะและขั้นตอนสั่งการ (Action Items)
+                </h2>
+                <div class="bg-emerald-50/40 rounded-xl p-5 border border-emerald-100 text-slate-800 leading-relaxed whitespace-pre-line text-base">
+{{ report.action_items }}
+                </div>
+            </div>
+        </div>
+
+        <!-- Secretary Note Footer -->
+        <div class="bg-white rounded-xl p-5 border border-slate-200 shadow-sm flex items-center justify-between text-sm text-slate-500">
+            <div class="flex items-center space-x-3">
+                <div class="w-9 h-9 rounded-full bg-blue-100 flex items-center justify-center text-blue-700 font-bold">
+                    เลขา
+                </div>
+                <div>
+                    <p class="font-medium text-slate-700">จัดทำโดย: เลขา AI และที่ปรึกษากฎหมายประจำตัว</p>
+                    <p class="text-xs text-slate-400">ระบบคัดกรองเบื้องต้นสำหรับผู้บริหารเพื่อประกอบการตัดสินใจ</p>
+                </div>
+            </div>
+            <a href="javascript:history.back()" class="text-blue-600 hover:underline font-medium no-print">← กลับสู่หน้าแชต</a>
+        </div>
+    </main>
+</body>
+</html>
