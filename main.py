@@ -19,7 +19,7 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 TYPHOON_API_KEY = os.environ.get("TYPHOON_API_KEY", "")
 
-# รายชื่อโมเดลของ Google AI Studio ที่จะสลับเรียกอัตโนมัติเพื่อแก้ปัญหา 404
+# รายชื่อโมเดลของ Google AI Studio ที่จะสลับเรียกอัตโนมัติเมื่อตัวใดตัวหนึ่งติดคิว (503)
 CANDIDATE_MODELS = [
     "gemini-2.0-flash",
     "gemini-1.5-flash-latest",
@@ -156,13 +156,15 @@ async def call_gemini_with_fallback(parts: list) -> Tuple[bool, str]:
                 if res.status_code == 200:
                     raw = res.json()['candidates'][0]['content']['parts'][0]['text']
                     return True, raw
-                elif res.status_code == 404:
+                elif res.status_code in [404, 503, 429]:
+                    # หากติด 503 (คนใช้เยอะชั่วคราว) หรือ 404 ให้สลับไปโมเดลตัวถัดไปทันที
+                    await asyncio.sleep(1)
                     continue
                 else:
                     return False, f"API ตอบกลับสถานะ {res.status_code}: {res.text[:300]}"
             except Exception as e:
                 continue
-    return False, "ไม่พบโมเดล Gemini ที่พร้อมใช้งานสำหรับ API Key นี้"
+    return False, "เซิร์ฟเวอร์ AI ของ Google กำลังมีผู้ใช้งานหนาแน่นชั่วคราว กรุณารอสักครู่แล้วส่งใหม่อีกครั้งนะคะ"
 
 @app.get("/")
 def root():
@@ -183,7 +185,7 @@ async def telegram_webhook(request: Request):
     if "text" in message:
         text = message["text"].strip()
         if text.startswith("/start"):
-            await send_telegram(chat_id, f"สวัสดีค่ะบอส {user_name}! น้องพร้อมรับใช้บอสแล้วนะคะ สั่งงาน หรือส่งเอกสาร/รูปถ่ายเข้ามาได้เลยค่ะ ✨")
+            await send_telegram(chat_id, f"สวัสดีค่ะบอส {user_name}! น้องพร้อมเป็นเลขาคู่ใจและที่ปรึกษากฎหมายให้บอสแล้วนะคะ สั่งงาน หรือส่งเอกสาร/รูปถ่ายเข้ามาได้เลยค่ะ ✨")
             return
         if "เตือน" in text or "นัด" in text:
             await send_telegram(chat_id, f"น้องบันทึกนัดหมาย '{text}' ให้แล้วนะคะ ✨")
