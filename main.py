@@ -18,14 +18,23 @@ from jinja2 import Template
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 TYPHOON_API_KEY = os.environ.get("TYPHOON_API_KEY", "")
+TYPHOON_URL = "https://api.opentyphoon.ai/v1/chat/completions"
 
-# รายชื่อโมเดลของ Google AI Studio ที่จะสลับเรียกอัตโนมัติเมื่อตัวใดตัวหนึ่งติดคิว (503)
-CANDIDATE_MODELS = [
+# 1. รายชื่อโมเดล Gemini เรียงตามลำดับ (ถ้าตัวไหน 503/404/429 จะสลับไปตัวถัดไปทันที)
+GEMINI_CANDIDATES = [
     "gemini-2.0-flash",
     "gemini-1.5-flash-latest",
     "gemini-1.5-flash-002",
+    "gemini-1.5-pro",
     "gemini-2.5-flash",
     "gemini-1.5-flash"
+]
+
+# 2. รายชื่อโมเดล Typhoon (SCB 10X) ที่เป็นไม้สองสำรองอัตโนมัติเมื่อ Google แน่น
+TYPHOON_CANDIDATES = [
+    "typhoon-2.5-30b-instruct",
+    "typhoon-2-1-gemma3-12b",
+    "llama3.1-typhoon2-70b-instruct"
 ]
 
 DB_PATH = "/tmp/assistant.db"
@@ -142,29 +151,59 @@ def extract_text_from_pdf(pdf_bytes: bytes) -> str:
     except Exception as e:
         return ""
 
-async def call_gemini_with_fallback(parts: list) -> Tuple[bool, str]:
-    headers = {"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"}
-    payload = {
-        "contents": [{"role": "user", "parts": parts}],
-        "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json"}
-    }
+async def call_ai_waterfall(parts: list, pure_text: str = "") -> Tuple[bool, str]:
+    """
+    ระบบน้ำตกสลับโมเดลอัตโนมัติ (Waterfall Multi-Model Fallback):
+    1. วนเรียกโมเดลตระกูล Google Gemini ทีละตัว (ถ้าเจอ 503, 404, หรือ 429 จะข้ามไปตัวถัดไปทันที)
+    2. ถ้า Gemini ทุกตัวแน่น และมีข้อความ จะสลับไปเรียก Typhoon 2.5 ของ SCB 10X ทันที!
+    """
     async with httpx.AsyncClient(timeout=120.0) as client:
-        for model in CANDIDATE_MODELS:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
-            try:
-                res = await client.post(url, headers=headers, json=payload)
-                if res.status_code == 200:
-                    raw = res.json()['candidates'][0]['content']['parts'][0]['text']
-                    return True, raw
-                elif res.status_code in [404, 503, 429]:
-                    # หากติด 503 (คนใช้เยอะชั่วคราว) หรือ 404 ให้สลับไปโมเดลตัวถัดไปทันที
-                    await asyncio.sleep(1)
+        # ขั้นที่ 1: ตระกูล Gemini
+        if GEMINI_API_KEY:
+            headers = {"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"}
+            payload = {
+                "contents": [{"role": "user", "parts": parts}],
+                "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json"}
+            }
+            for model in GEMINI_CANDIDATES:
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
+                try:
+                    res = await client.post(url, headers=headers, json=payload)
+                    if res.status_code == 200:
+                        raw = res.json()['candidates'][0]['content']['parts'][0]['text']
+                        return True, raw
+                    elif res.status_code in [404, 503, 429]:
+                        print(f"[GEMINI {res.status_code}] on {model} -> trying next model...")
+                        await asyncio.sleep(0.5)
+                        continue
+                except Exception as e:
                     continue
-                else:
-                    return False, f"API ตอบกลับสถานะ {res.status_code}: {res.text[:300]}"
-            except Exception as e:
-                continue
-    return False, "เซิร์ฟเวอร์ AI ของ Google กำลังมีผู้ใช้งานหนาแน่นชั่วคราว กรุณารอสักครู่แล้วส่งใหม่อีกครั้งนะคะ"
+
+        # ขั้นที่ 2: สลับไปใช้ Typhoon (SCB 10X) หาก Gemini ทุกตัวติดขัด
+        if TYPHOON_API_KEY and pure_text:
+            print("[FALLBACK] Switching to Typhoon 2.5...")
+            t_headers = {
+                "Authorization": f"Bearer {TYPHOON_API_KEY}",
+                "Content-Type": "application/json"
+            }
+            prompt_content = f"{DOCUMENT_ANALYSIS_PROMPT}\n\n[เนื้อหาเอกสาร]:\n{pure_text[:40000]}"
+            for t_model in TYPHOON_CANDIDATES:
+                t_payload = {
+                    "model": t_model,
+                    "messages": [{"role": "user", "content": prompt_content}],
+                    "temperature": 0.2
+                }
+                try:
+                    res = await client.post(TYPHOON_URL, headers=t_headers, json=t_payload)
+                    if res.status_code == 200:
+                        raw = res.json()['choices'][0]['message']['content']
+                        return True, raw
+                    elif res.status_code in [404, 503, 429]:
+                        continue
+                except Exception as e:
+                    continue
+
+    return False, "เซิร์ฟเวอร์ AI ของทั้ง Google และ Typhoon กำลังมีผู้ใช้งานหนาแน่นชั่วคราว กรุณารอสักครู่แล้วลองส่งใหม่อีกครั้งนะคะ"
 
 @app.get("/")
 def root():
@@ -234,10 +273,11 @@ async def telegram_webhook(request: Request):
         legal = "ไม่มีข้อมูล"
         actions = "ไม่มีข้อมูล"
 
-        if GEMINI_API_KEY and file_bytes:
+        if file_bytes:
             if len(pdf_text) > 100:
                 prompt_content = f"{DOCUMENT_ANALYSIS_PROMPT}\n\n[ชื่อไฟล์]: {file_name}\n[เนื้อหาจากเอกสาร]:\n{pdf_text[:50000]}"
                 parts = [{"text": prompt_content}]
+                pure_text = pdf_text
             else:
                 actual_mime = "application/pdf" if ext == "pdf" else ("image/jpeg" if ext in ["jpg", "jpeg"] else ("image/png" if ext == "png" else mime_type))
                 b64_data = base64.b64encode(file_bytes).decode("utf-8")
@@ -246,8 +286,9 @@ async def telegram_webhook(request: Request):
                     {"inlineData": {"mimeType": actual_mime, "data": b64_data}},
                     {"text": prompt_content}
                 ]
+                pure_text = ""
 
-            success, result_text = await call_gemini_with_fallback(parts)
+            success, result_text = await call_ai_waterfall(parts, pure_text)
             if success:
                 try:
                     cleaned = result_text.strip()
@@ -260,7 +301,7 @@ async def telegram_webhook(request: Request):
                     legal = data.get("legal_analysis", legal)
                     actions = data.get("action_items", actions)
                 except Exception as e:
-                    summary = f"ข้อผิดพลาดในการแปลงผลลัพธ์: {e}"
+                    summary = f"ข้อผิดพลาดในการแปลงผลลัพธ์: {e}\nข้อความดิบ: {result_text[:300]}"
             else:
                 summary = result_text
 
