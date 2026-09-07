@@ -1,10 +1,11 @@
 import os
 import json
 import uuid
-import base64
 import asyncio
 import sqlite3
 import httpx
+import pypdf
+import io
 from datetime import datetime, timedelta
 from typing import Dict, Any, Tuple, Optional
 from contextlib import asynccontextmanager
@@ -12,7 +13,6 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
 from jinja2 import Template
 
-# ----------------- CONFIGURATION -----------------
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash")
@@ -38,32 +38,16 @@ def init_db():
         print(f"[DB INIT ERROR] {e}")
 
 DOCUMENT_ANALYSIS_PROMPT = """
-คุณคือ 'หัวหน้าสำนักเลขานุการและที่ปรึกษากฎหมายประจำตัวผู้บริหาร'
-ภารกิจ: อ่านข้อความ ตัวเลข สถิติ และสาระสำคัญทั้งหมดในเอกสารหรือภาพนี้อย่างละเอียด และห้ามแต่งเติมข้อมูลที่ไม่ตรงกับเอกสารเด็ดขาด!
+คุณคือ 'หัวหน้าสำนักเลขานุการและที่ปรึกษากฎหมายประจำตัวผู้บริหารระดับสูง'
+หน้าที่: วิเคราะห์และกลั่นกรองเอกสารนี้อย่างละเอียด ถูกต้อง แม่นยำ ตรงตามข้อเท็จจริงในเอกสาร 100% ห้ามตอบแบบกว้างๆ หรือแต่งเติมเด็ดขาด!
 
-[เกณฑ์การวิเคราะห์ตามประเภทเอกสารจริง]:
-1. หากเป็น "ร่างสัญญา / ข้อตกลง / MOU / TOR":
-   - สรุปสาระสำคัญ: คู่สัญญา, วัตถุประสงค์, วงเงินงบประมาณ, เงื่อนไขการจ่ายเงิน, กำหนดเวลาส่งมอบงาน
-   - การกลั่นกรองข้อกฎหมายและจุดเสี่ยง (Red Flags): ตรวจสอบอำนาจลงนาม, ระเบียบที่เกี่ยวข้อง (เช่น ระเบียบจัดซื้อจัดจ้างฯ), เงื่อนไขเบี้ยปรับ, สิทธิการบอกเลิกสัญญา, ข้อจำกัดความรับผิด พร้อมยกร่างข้อความแก้ไขภาษาไทยที่รัดกุม
-   - ข้อเสนอแนะเชิงบริหาร (Action Items): ขั้นตอนสั่งการที่บอสควรพิจารณาก่อนลงนาม
-   - ระดับความเสี่ยง: ประเมินตามเนื้อหาจริง (ต่ำ / ปานกลาง / สูง)
-
-2. หากเป็น "บันทึกข้อความราชการ / เอกสารขออนุมัติ":
-   - สรุป: เรื่องเดิม, ข้อเท็จจริง, ข้อพิจารณาตามระเบียบ และข้อเสนอสั่งการ
-
-3. หากเป็น "สื่อประชาสัมพันธ์ / อินโฟกราฟิก / ข่าวสารเตือนภัย / สุขอนามัย (เช่น ข่าวโควิด-19)":
-   - สรุปสาระสำคัญ: ถอดข้อเท็จจริง สถิติตัวเลข อาการ วิธีป้องกัน และคำแนะนำตามภาพจริง
-   - การกลั่นกรองข้อกฎหมายและผลกระทบ: ชี้แจงว่า "เอกสารฉบับนี้เป็นสื่อประชาสัมพันธ์/แจ้งเตือนภัยสุขภาพ ไม่ใช่นิติกรรมสัญญา จึงไม่มีภาระผูกพันทางกฎหมายหรือเบี้ยปรับ แต่เป็นประเด็นด้านการเฝ้าระวังสุขอนามัยของบุคลากรในสถานที่ทำงาน"
-   - ข้อเสนอแนะเชิงบริหาร: แนะนำขั้นตอนเชิงบริหาร เช่น การแจ้งเวียนบุคลากรเพื่อทราบและเฝ้าระวัง
-
-ตอบกลับในรูปแบบ JSON เท่านั้น:
+โปรดจัดทำบทวิเคราะห์ในรูปแบบ JSON ตามโครงสร้างนี้:
 {
-  "title": "ชื่อเรื่องตรงตามเอกสารจริง",
-  "document_type": "สัญญา/MOU | บันทึกข้อความราชการ | สื่อประชาสัมพันธ์ | เอกสารทั่วไป",
-  "risk_level": "ต่ำ (Low) | ปานกลาง (Medium) | สูง (High) | วิกฤต (Critical)",
-  "executive_summary": "สรุปสาระสำคัญอย่างละเอียดตามเนื้อหาจริงในเอกสาร",
-  "legal_analysis": "การกลั่นกรองข้อกฎหมาย จุดเสี่ยง หรือผลกระทบต่อองค์กรอย่างเป็นมืออาชีพ",
-  "action_items": "ข้อเสนอแนะและขั้นตอนดำเนินการเชิงบริหารที่ตรงกับเนื้อหาจริง"
+  "title": "ชื่อประกาศ/สัญญา/ระเบียบ ตามที่ระบุจริงในเอกสาร",
+  "risk_level": "ต่ำ (Low) | ปานกลาง (Medium) | สูง (High)",
+  "executive_summary": "สรุปสาระสำคัญเสนอผู้บริหาร: สรุปความเป็นมา, วัตถุประสงค์, โครงสร้างการกำกับดูแล/คู่สัญญา, ขอบเขตนโยบาย, ข้อกำหนดและข้อห้ามสำคัญ โดยระบุข้อเท็จจริงและตัวเลขที่ชัดเจน",
+  "legal_analysis": "การกลั่นกรองข้อกฎหมาย ระเบียบ และผลกระทบต่อองค์กร: ฐานอำนาจตามกฎหมายที่ใช้ออกเอกสาร, กฎหมายและระเบียบที่ต้องปฏิบัติตาม, การจัดระดับชั้นความลับ, และจุดเสี่ยง (Red Flags) ที่ต้องระมัดระวังในทางปฏิบัติ",
+  "action_items": "ข้อเสนอแนะเชิงบริหารและขั้นตอนสั่งการ: ลิสต์เป็นข้อๆ ชัดเจน ว่าผู้บริหารควรสั่งการให้สายงานใดดำเนินการเรื่องใดต่ออย่างเป็นรูปธรรม"
 }
 """
 
@@ -72,7 +56,7 @@ HTML_REPORT_TEMPLATE = """<!DOCTYPE html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>บันทึกกลั่นกรองเอกสารเสนอผู้บริหาร - {{ report.title }}</title>
+    <title>{{ report.title }} - บันทึกกลั่นกรองเสนอผู้บริหาร</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <style>body { font-family: 'Sarabun', sans-serif; } @media print { .no-print { display: none; } body { background: white; color: black; } }</style>
@@ -80,25 +64,37 @@ HTML_REPORT_TEMPLATE = """<!DOCTYPE html>
 <body class="bg-slate-50 text-slate-800 min-h-screen pb-12">
     <header class="bg-white border-b border-slate-200 sticky top-0 z-10 shadow-sm no-print">
         <div class="max-w-4xl mx-auto px-4 py-3 flex items-center justify-between">
-            <span class="text-xl font-bold text-blue-600">YES BOSS</span>
-            <button onclick="window.print()" class="bg-indigo-600 text-white text-sm px-3 py-1.5 rounded-lg">🖨️ พิมพ์ / บันทึก PDF</button>
+            <span class="text-xl font-bold text-blue-700">YES BOSS</span>
+            <button onclick="window.print()" class="bg-blue-600 hover:bg-blue-700 text-white text-sm px-4 py-2 rounded-lg font-medium shadow-sm transition">🖨️ พิมพ์ / บันทึกเป็น PDF</button>
         </div>
     </header>
     <main class="max-w-4xl mx-auto px-4 mt-6">
-        <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 mb-6">
-            <h1 class="text-2xl font-bold text-slate-900 mb-1">{{ report.title }}</h1>
-            <p class="text-sm text-slate-500 mb-4">ไฟล์: {{ report.filename }} | วันที่ตรวจ: {{ report.created_at }} | ระดับความเสี่ยง: <span class="font-bold text-blue-600">{{ report.risk }}</span></p>
-            <div class="mb-6">
-                <h2 class="text-lg font-bold text-blue-900 mb-2">1. สรุปสาระสำคัญเสนอผู้บริหาร (Executive Brief)</h2>
-                <div class="bg-slate-50 rounded-xl p-4 text-slate-700 whitespace-pre-line leading-relaxed">{{ report.summary }}</div>
+        <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 md:p-8 mb-6">
+            <h1 class="text-2xl md:text-3xl font-bold text-slate-900 mb-2">{{ report.title }}</h1>
+            <p class="text-sm text-slate-500 mb-6 border-b border-slate-100 pb-4">
+                ไฟล์: <span class="font-medium text-slate-700">{{ report.filename }}</span> | วันที่ตรวจ: {{ report.created_at }} | 
+                ระดับความเสี่ยง: <span class="font-semibold text-blue-700">{{ report.risk }}</span>
+            </p>
+            <div class="mb-8">
+                <h2 class="text-lg font-bold text-blue-900 mb-3 flex items-center">
+                    <span class="w-2.5 h-6 bg-blue-600 rounded-full mr-2.5"></span>
+                    1. สรุปสาระสำคัญเสนอผู้บริหาร (Executive Brief)
+                </h2>
+                <div class="bg-slate-50 rounded-xl p-5 border border-slate-100 text-slate-700 whitespace-pre-line leading-relaxed text-base">{{ report.summary }}</div>
             </div>
-            <div class="mb-6">
-                <h2 class="text-lg font-bold text-indigo-900 mb-2">2. การกลั่นกรองข้อกฎหมายและจุดเสี่ยง (Legal & Impact Analysis)</h2>
-                <div class="bg-indigo-50/50 rounded-xl p-4 text-slate-800 whitespace-pre-line leading-relaxed">{{ report.legal }}</div>
+            <div class="mb-8">
+                <h2 class="text-lg font-bold text-indigo-900 mb-3 flex items-center">
+                    <span class="w-2.5 h-6 bg-indigo-600 rounded-full mr-2.5"></span>
+                    2. การกลั่นกรองข้อกฎหมายและผลกระทบ (Legal & Impact Analysis)
+                </h2>
+                <div class="bg-indigo-50/50 rounded-xl p-5 border border-indigo-100/70 text-slate-800 whitespace-pre-line leading-relaxed text-base">{{ report.legal }}</div>
             </div>
             <div>
-                <h2 class="text-lg font-bold text-emerald-900 mb-2">3. ข้อเสนอแนะเชิงบริหาร (Action Items)</h2>
-                <div class="bg-emerald-50/40 rounded-xl p-4 text-slate-800 whitespace-pre-line leading-relaxed">{{ report.actions }}</div>
+                <h2 class="text-lg font-bold text-emerald-900 mb-3 flex items-center">
+                    <span class="w-2.5 h-6 bg-emerald-600 rounded-full mr-2.5"></span>
+                    3. ข้อเสนอแนะเชิงบริหารและขั้นตอนสั่งการ (Action Items)
+                </h2>
+                <div class="bg-emerald-50/40 rounded-xl p-5 border border-emerald-100 text-slate-800 whitespace-pre-line leading-relaxed text-base">{{ report.actions }}</div>
             </div>
         </div>
     </main>
@@ -108,10 +104,9 @@ HTML_REPORT_TEMPLATE = """<!DOCTYPE html>
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
-    asyncio.create_task(background_chaser_loop())
     yield
 
-app = FastAPI(title="YES BOSS AI Assistant & Legal Screener", lifespan=lifespan)
+app = FastAPI(title="YES BOSS Assistant", lifespan=lifespan)
 
 async def send_telegram(chat_id: int, text: str):
     if not TELEGRAM_BOT_TOKEN:
@@ -124,120 +119,17 @@ async def send_telegram(chat_id: int, text: str):
         else:
             await client.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
 
-async def background_chaser_loop():
-    while True:
-        try:
-            now = datetime.now().isoformat()
-            with get_db() as conn:
-                cur = conn.cursor()
-                cur.execute("SELECT * FROM tasks WHERE status = 'pending' AND next_remind <= ?", (now,))
-                due_tasks = [dict(r) for r in cur.fetchall()]
-                for t in due_tasks:
-                    count = t["remind_count"] + 1
-                    msg = f"⏰ <b>บอสคะ!</b> งาน '{t['title']}' ได้เวลาแล้วนะคะ (เตือนรอบที่ {count}) ถ้าเสร็จแล้วพิมพ์บอกน้องด้วยน้า ✨"
-                    next_time = (datetime.now() + timedelta(minutes=20)).isoformat()
-                    cur.execute("UPDATE tasks SET next_remind = ?, remind_count = ? WHERE id = ?", (next_time, count, t["id"]))
-                    conn.commit()
-                    await send_telegram(int(t["user_id"]), msg)
-        except Exception as e:
-            print(f"[CHASER ERROR] {e}")
-        await asyncio.sleep(60)
-
-async def process_file_and_reply(chat_id: int, file_id: str, file_name: str, mime_type: str, base_url: str):
-    """ดาวน์โหลดและประมวลผลไฟล์ทุกประเภท (PDF, Word, รูปภาพ)"""
-    await send_telegram(chat_id, f"น้องได้รับไฟล์ <b>'{file_name}'</b> แล้วค่ะ กำลังดาวน์โหลดและอ่านเนื้อหาอย่างละเอียดให้นะคะ... ⏳")
-
-    file_bytes = None
-    if TELEGRAM_BOT_TOKEN:
-        try:
-            async with httpx.AsyncClient(timeout=45.0) as client:
-                info_res = await client.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile?file_id={file_id}")
-                file_path = info_res.json()["result"]["file_path"]
-                f_res = await client.get(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}")
-                file_bytes = f_res.content
-        except Exception as e:
-            await send_telegram(chat_id, f"ขออภัยค่ะบอส ดาวน์โหลดไฟล์ไม่สำเร็จ: {e}")
-            return
-
-    report_id = str(uuid.uuid4())[:8]
-    title = f"เอกสาร: {file_name}"
-    risk = "ต่ำ (Low)"
-    summary = "ได้รับการอ่านเนื้อหาเรียบร้อยแล้ว"
-    legal = "การตรวจสอบข้อเท็จจริงและข้อกฎหมายเบื้องต้น"
-    actions = "1. นำเสนอเพื่อโปรดทราบหรือพิจารณา"
-
-    if GEMINI_API_KEY and file_bytes:
-        try:
-            ext = file_name.lower().split(".")[-1]
-            actual_mime = "application/pdf" if ext == "pdf" else ("image/jpeg" if ext in ["jpg", "jpeg"] else ("image/png" if ext == "png" else mime_type))
-            
-            b64_data = base64.b64encode(file_bytes).decode("utf-8")
-            headers = {"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"}
-            prompt_text = f"{DOCUMENT_ANALYSIS_PROMPT}\n\n[ชื่อไฟล์]: {file_name}\nโปรดวิเคราะห์สาระสำคัญตามข้อเท็จจริงในเอกสารนี้"
-
-            payload = {
-                "contents": [{
-                    "role": "user",
-                    "parts": [
-                        {"inlineData": {"mimeType": actual_mime, "data": b64_data}},
-                        {"text": prompt_text}
-                    ]
-                }],
-                "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json"}
-            }
-
-            async with httpx.AsyncClient(timeout=90.0) as client:
-                res = await client.post(GEMINI_URL, headers=headers, json=payload)
-                if res.status_code == 200:
-                    raw = res.json()['candidates'][0]['content']['parts'][0]['text']
-                    cleaned = raw.strip()
-                    if cleaned.startswith("```json"): cleaned = cleaned[7:]
-                    if cleaned.endswith("```"): cleaned = cleaned[:-3]
-                    data = json.loads(cleaned.strip())
-                    title = data.get("title", title)
-                    risk = data.get("risk_level", risk)
-                    summary = data.get("executive_summary", summary)
-                    legal = data.get("legal_analysis", legal)
-                    actions = data.get("action_items", actions)
-                else:
-                    print(f"[GEMINI ERROR {res.status_code}] {res.text}")
-        except Exception as e:
-            print(f"[GEMINI EXCEPTION] {e}")
-
-    # บันทึกข้อมูล
-    rep_data = {
-        "id": report_id, "title": title, "filename": file_name,
-        "summary": summary, "legal": legal, "risk": risk, "actions": actions,
-        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M")
-    }
-    MEMORY_REPORTS[report_id] = rep_data
+def extract_text_from_pdf(pdf_bytes: bytes) -> str:
     try:
-        with get_db() as conn:
-            conn.cursor().execute("INSERT INTO reports (id, user_id, title, filename, summary, legal, risk, actions) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                                  (report_id, str(chat_id), title, file_name, summary, legal, risk, actions))
-            conn.commit()
-    except Exception:
-        pass
-
-    # ส่งสรุปฉบับเต็มลงในแชต Telegram ทันที
-    full_chat_reply = f"""📑 <b>บันทึกกลั่นกรอง: {title}</b>
-━━━━━━━━━━━━━━━━━━━━
-
-<b>1. สรุปสาระสำคัญเสนอผู้บริหาร (Executive Brief):</b>
-{summary}
-
-<b>2. การกลั่นกรองข้อกฎหมายและจุดเสี่ยง (Legal & Impact):</b>
-{legal}
-
-<b>3. ข้อเสนอแนะเชิงบริหาร (Action Items):</b>
-{actions}
-
-━━━━━━━━━━━━━━━━━━━━
-⚡ <b>ระดับความเสี่ยง/การเฝ้าระวัง:</b> {risk}
-🔗 <b>เปิดดูหน้าเว็บ / พิมพ์ PDF:</b>
-{base_url}/report/{report_id}"""
-
-    await send_telegram(chat_id, full_chat_reply)
+        reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
+        extracted = []
+        for idx, page in enumerate(reader.pages):
+            txt = page.extract_text()
+            if txt:
+                extracted.append(f"--- หน้า {idx+1} ---\n{txt}")
+        return "\n\n".join(extracted)
+    except Exception as e:
+        return f"Error extracting PDF: {e}"
 
 @app.get("/")
 def root():
@@ -255,34 +147,95 @@ async def telegram_webhook(request: Request):
     from_user = message.get("from", {})
     user_name = from_user.get("first_name", "บอส")
 
-    # 1. ข้อความแชต
     if "text" in message:
         text = message["text"].strip()
         if text.startswith("/start"):
-            await send_telegram(chat_id, f"สวัสดีค่ะบอส {user_name}! น้องพร้อมเป็นเลขาคู่ใจและที่ปรึกษากฎหมายให้บอสแล้วนะคะ สั่งงาน หรือส่งไฟล์ PDF / รูปถ่ายเข้ามาได้เลยค่ะ ✨")
+            await send_telegram(chat_id, f"สวัสดีค่ะบอส {user_name}! น้องพร้อมเป็นเลขาคู่ใจและที่ปรึกษากฎหมายให้บอสแล้วนะคะ ส่งเอกสารหรือสั่งงานได้เลยค่ะ ✨")
             return
         if "เตือน" in text or "นัด" in text:
-            await send_telegram(chat_id, f"น้องบันทึกนัดหมาย '{text}' ให้แล้วนะคะ จะคอยเตือนและตามจิกให้จนงานเสร็จแน่นอนค่ะบอส! ✨")
+            await send_telegram(chat_id, f"น้องบันทึกนัดหมาย '{text}' ให้แล้วนะคะ ✨")
         elif "เสร็จ" in text:
-            await send_telegram(chat_id, "รับทราบค่ะบอส! น้องติ๊กปิดงานให้เรียบร้อยแล้ว เก่งมากเลยค่ะ ☕")
+            await send_telegram(chat_id, "รับทราบค่ะบอส! น้องติ๊กปิดงานเรียบร้อยแล้วค่ะ ☕")
         elif "เหนื่อย" in text:
-            await send_telegram(chat_id, "กอดๆ นะคะบอส วันนี้เหนื่อยมาทั้งวันแล้ว พักผ่อนสายตาบ้างนะคะ น้องอยู่ข้างๆ เสมอน้า 💙")
+            await send_telegram(chat_id, "กอดๆ นะคะบอส วันนี้เหนื่อยมาทั้งวันแล้ว พักผ่อนบ้างนะคะ 💙")
         else:
-            await send_telegram(chat_id, f"รับทราบคำสั่งค่ะบอส '{text}' น้องสแตนด์บายช่วยเสมอค่ะ ✨")
+            await send_telegram(chat_id, f"รับทราบคำสั่งค่ะบอส '{text}' ✨")
 
-    # 2. กรณีส่งไฟล์เอกสาร (PDF, Word, หรือไฟล์อื่นๆ) -> รองรับแล้ว 100%!
     elif "document" in message:
         doc = message["document"]
         file_id = doc["file_id"]
         file_name = doc.get("file_name", "document.pdf")
-        mime_type = doc.get("mime_type", "application/pdf")
-        await process_file_and_reply(chat_id, file_id, file_name, mime_type, base_url)
+        
+        await send_telegram(chat_id, f"น้องได้รับเอกสาร <b>'{file_name}'</b> แล้วค่ะ กำลังอ่านข้อความและกลั่นกรองวิเคราะห์ให้อย่างละเอียดนะคะ... ⏳")
 
-    # 3. กรณีส่งรูปภาพ (Photo)
-    elif "photo" in message:
-        photos = message["photo"]
-        file_id = photos[-1]["file_id"]
-        await process_file_and_reply(chat_id, file_id, "photo.jpg", "image/jpeg", base_url)
+        file_bytes = None
+        if TELEGRAM_BOT_TOKEN:
+            try:
+                async with httpx.AsyncClient(timeout=45.0) as client:
+                    info_res = await client.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile?file_id={file_id}")
+                    file_path = info_res.json()["result"]["file_path"]
+                    f_res = await client.get(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}")
+                    file_bytes = f_res.content
+            except Exception as e:
+                await send_telegram(chat_id, f"ดาวน์โหลดไฟล์ไม่สำเร็จ: {e}")
+                return
+
+        # สกัดข้อความภาษาไทยจริงออกจาก PDF ทั้งหมด
+        pdf_text = extract_text_from_pdf(file_bytes) if file_bytes else ""
+        
+        report_id = str(uuid.uuid4())[:8]
+        title = file_name
+        risk = "ปานกลาง"
+        summary = "ไม่สามารถอ่านเนื้อหาได้"
+        legal = "ไม่มีข้อมูล"
+        actions = "ไม่มีข้อมูล"
+
+        if GEMINI_API_KEY and pdf_text:
+            try:
+                headers = {"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"}
+                prompt_content = f"{DOCUMENT_ANALYSIS_PROMPT}\n\n[ชื่อไฟล์]: {file_name}\n[เนื้อหาทั้งหมดจากเอกสาร]:\n{pdf_text[:40000]}"
+                payload = {
+                    "contents": [{"role": "user", "parts": [{"text": prompt_content}]}],
+                    "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json"}
+                }
+                async with httpx.AsyncClient(timeout=90.0) as client:
+                    res = await client.post(GEMINI_URL, headers=headers, json=payload)
+                    if res.status_code == 200:
+                        raw = res.json()['candidates'][0]['content']['parts'][0]['text']
+                        data = json.loads(raw.strip())
+                        title = data.get("title", title)
+                        risk = data.get("risk_level", risk)
+                        summary = data.get("executive_summary", summary)
+                        legal = data.get("legal_analysis", legal)
+                        actions = data.get("action_items", actions)
+            except Exception as e:
+                print(f"[AI ANALYSIS ERROR] {e}")
+
+        rep_data = {
+            "id": report_id, "title": title, "filename": file_name,
+            "summary": summary, "legal": legal, "risk": risk, "actions": actions,
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M")
+        }
+        MEMORY_REPORTS[report_id] = rep_data
+
+        chat_reply = f"""📑 <b>{title}</b>
+━━━━━━━━━━━━━━━━━━━━
+
+<b>1. สรุปสาระสำคัญเสนอผู้บริหาร (Executive Brief):</b>
+{summary}
+
+<b>2. การกลั่นกรองข้อกฎหมายและผลกระทบ (Legal & Impact):</b>
+{legal}
+
+<b>3. ข้อเสนอแนะเชิงบริหาร (Action Items):</b>
+{actions}
+
+━━━━━━━━━━━━━━━━━━━━
+⚡ <b>ระดับความเสี่ยง/การเฝ้าระวัง:</b> {risk}
+🔗 <b>เปิดดูหน้าเว็บ / พิมพ์เป็น PDF:</b>
+{base_url}/report/{report_id}"""
+
+        await send_telegram(chat_id, chat_reply)
 
     return {"ok": True}
 
@@ -290,19 +243,7 @@ async def telegram_webhook(request: Request):
 async def view_report(report_id: str):
     report = MEMORY_REPORTS.get(report_id)
     if not report:
-        try:
-            with get_db() as conn:
-                cur = conn.cursor()
-                cur.execute("SELECT * FROM reports WHERE id = ?", (report_id,))
-                row = cur.fetchone()
-                if row:
-                    report = dict(row)
-        except Exception:
-            pass
-
-    if not report:
-        return HTMLResponse("<h3>ไม่พบบันทึกรายงานนี้ กรุณาส่งเอกสารใหม่อีกครั้งใน Telegram นะคะ</h3>", status_code=404)
-
+        return HTMLResponse("<h3>ไม่พบรายงาน หรือระบบเพิ่งอัปเดต กรุณาส่งเอกสารใหม่อีกครั้งนะคะ</h3>", status_code=404)
     t = Template(HTML_REPORT_TEMPLATE)
     return HTMLResponse(content=t.render(report=report))
 
