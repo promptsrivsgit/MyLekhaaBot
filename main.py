@@ -17,8 +17,16 @@ from jinja2 import Template
 # ----------------- CONFIGURATION -----------------
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash")
-GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+TYPHOON_API_KEY = os.environ.get("TYPHOON_API_KEY", "")
+
+# รายชื่อโมเดลของ Google AI Studio ที่จะสลับเรียกอัตโนมัติเพื่อแก้ปัญหา 404
+CANDIDATE_MODELS = [
+    "gemini-2.0-flash",
+    "gemini-1.5-flash-latest",
+    "gemini-1.5-flash-002",
+    "gemini-2.5-flash",
+    "gemini-1.5-flash"
+]
 
 DB_PATH = "/tmp/assistant.db"
 MEMORY_REPORTS: Dict[str, Dict[str, Any]] = {}
@@ -123,7 +131,6 @@ async def send_telegram(chat_id: int, text: str):
             await client.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
 
 def extract_text_from_pdf(pdf_bytes: bytes) -> str:
-    """พยายามสกัดข้อความ (กรณีเป็น PDF ดิจิทัล)"""
     try:
         reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
         extracted = []
@@ -134,6 +141,28 @@ def extract_text_from_pdf(pdf_bytes: bytes) -> str:
         return "\n\n".join(extracted).strip()
     except Exception as e:
         return ""
+
+async def call_gemini_with_fallback(parts: list) -> Tuple[bool, str]:
+    headers = {"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"}
+    payload = {
+        "contents": [{"role": "user", "parts": parts}],
+        "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json"}
+    }
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        for model in CANDIDATE_MODELS:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
+            try:
+                res = await client.post(url, headers=headers, json=payload)
+                if res.status_code == 200:
+                    raw = res.json()['candidates'][0]['content']['parts'][0]['text']
+                    return True, raw
+                elif res.status_code == 404:
+                    continue
+                else:
+                    return False, f"API ตอบกลับสถานะ {res.status_code}: {res.text[:300]}"
+            except Exception as e:
+                continue
+    return False, "ไม่พบโมเดล Gemini ที่พร้อมใช้งานสำหรับ API Key นี้"
 
 @app.get("/")
 def root():
@@ -154,7 +183,7 @@ async def telegram_webhook(request: Request):
     if "text" in message:
         text = message["text"].strip()
         if text.startswith("/start"):
-            await send_telegram(chat_id, f"สวัสดีค่ะบอส {user_name}! น้องพร้อมเป็นเลขาคู่ใจและที่ปรึกษากฎหมายให้บอสแล้วนะคะ สั่งงาน หรือส่งไฟล์ PDF / รูปถ่ายเข้ามาได้เลยค่ะ ✨")
+            await send_telegram(chat_id, f"สวัสดีค่ะบอส {user_name}! น้องพร้อมรับใช้บอสแล้วนะคะ สั่งงาน หรือส่งเอกสาร/รูปถ่ายเข้ามาได้เลยค่ะ ✨")
             return
         if "เตือน" in text or "นัด" in text:
             await send_telegram(chat_id, f"น้องบันทึกนัดหมาย '{text}' ให้แล้วนะคะ ✨")
@@ -165,7 +194,6 @@ async def telegram_webhook(request: Request):
         else:
             await send_telegram(chat_id, f"รับทราบคำสั่งค่ะบอส '{text}' ✨")
 
-    # กรณีส่งไฟล์เอกสาร (PDF, Word, ภาพสแกน)
     elif "document" in message or "photo" in message:
         if "document" in message:
             doc = message["document"]
@@ -189,10 +217,9 @@ async def telegram_webhook(request: Request):
                     f_res = await client.get(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}")
                     file_bytes = f_res.content
             except Exception as e:
-                await send_telegram(chat_id, f"ขออภัยค่ะบอส ดาวน์โหลดไฟล์ไม่สำเร็จ: {e}")
+                await send_telegram(chat_id, f"ดาวน์โหลดไฟล์ไม่สำเร็จ: {e}")
                 return
 
-        # 1. ตรวจสอบว่าเป็น PDF ที่มีตัวหนังสือ หรือเป็นภาพสแกน
         pdf_text = ""
         ext = file_name.lower().split(".")[-1]
         if ext == "pdf" and file_bytes:
@@ -201,19 +228,14 @@ async def telegram_webhook(request: Request):
         report_id = str(uuid.uuid4())[:8]
         title = file_name
         risk = "ปานกลาง (Medium)"
-        summary = "กำลังประมวลผล..."
-        legal = "กำลังประมวลผล..."
-        actions = "กำลังประมวลผล..."
+        summary = "ไม่สามารถประมวลผลได้"
+        legal = "ไม่มีข้อมูล"
+        actions = "ไม่มีข้อมูล"
 
-        # 2. ส่งให้ Gemini 1.5 Flash วิเคราะห์
         if GEMINI_API_KEY and file_bytes:
-            headers = {"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"}
-            
-            # กรณีที่ 1: เป็น PDF ดิจิทัล มีข้อความตัวหนังสือชัดเจน
             if len(pdf_text) > 100:
                 prompt_content = f"{DOCUMENT_ANALYSIS_PROMPT}\n\n[ชื่อไฟล์]: {file_name}\n[เนื้อหาจากเอกสาร]:\n{pdf_text[:50000]}"
                 parts = [{"text": prompt_content}]
-            # กรณีที่ 2: เป็น PDF ภาพสแกน (เช่น ประกาศ กปน.) หรือเป็นไฟล์รูปภาพ ให้ใช้ Gemini Vision อ่าน OCR ทุกหน้าโดยตรง
             else:
                 actual_mime = "application/pdf" if ext == "pdf" else ("image/jpeg" if ext in ["jpg", "jpeg"] else ("image/png" if ext == "png" else mime_type))
                 b64_data = base64.b64encode(file_bytes).decode("utf-8")
@@ -223,26 +245,22 @@ async def telegram_webhook(request: Request):
                     {"text": prompt_content}
                 ]
 
-            payload = {
-                "contents": [{"role": "user", "parts": parts}],
-                "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json"}
-            }
-
-            try:
-                async with httpx.AsyncClient(timeout=120.0) as client:
-                    res = await client.post(GEMINI_URL, headers=headers, json=payload)
-                    if res.status_code == 200:
-                        raw = res.json()['candidates'][0]['content']['parts'][0]['text']
-                        data = json.loads(raw.strip())
-                        title = data.get("title", title)
-                        risk = data.get("risk_level", risk)
-                        summary = data.get("executive_summary", summary)
-                        legal = data.get("legal_analysis", legal)
-                        actions = data.get("action_items", actions)
-                    else:
-                        summary = f"API ตอบกลับสถานะ {res.status_code}: {res.text[:300]}"
-            except Exception as e:
-                summary = f"เกิดข้อผิดพลาดในการวิเคราะห์ AI: {str(e)}"
+            success, result_text = await call_gemini_with_fallback(parts)
+            if success:
+                try:
+                    cleaned = result_text.strip()
+                    if cleaned.startswith("```json"): cleaned = cleaned[7:]
+                    if cleaned.endswith("```"): cleaned = cleaned[:-3]
+                    data = json.loads(cleaned.strip())
+                    title = data.get("title", title)
+                    risk = data.get("risk_level", risk)
+                    summary = data.get("executive_summary", summary)
+                    legal = data.get("legal_analysis", legal)
+                    actions = data.get("action_items", actions)
+                except Exception as e:
+                    summary = f"ข้อผิดพลาดในการแปลงผลลัพธ์: {e}"
+            else:
+                summary = result_text
 
         rep_data = {
             "id": report_id, "title": title, "filename": file_name,
