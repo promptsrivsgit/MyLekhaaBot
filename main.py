@@ -1,6 +1,7 @@
 import os
 import json
 import uuid
+import base64
 import asyncio
 import sqlite3
 import httpx
@@ -13,6 +14,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
 from jinja2 import Template
 
+# ----------------- CONFIGURATION -----------------
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash")
@@ -44,6 +46,7 @@ DOCUMENT_ANALYSIS_PROMPT = """
 โปรดจัดทำบทวิเคราะห์ในรูปแบบ JSON ตามโครงสร้างนี้:
 {
   "title": "ชื่อประกาศ/สัญญา/ระเบียบ ตามที่ระบุจริงในเอกสาร",
+  "document_type": "ประกาศ/นโยบาย | ร่างสัญญา/MOU | บันทึกข้อความราชการ | เอกสารทั่วไป",
   "risk_level": "ต่ำ (Low) | ปานกลาง (Medium) | สูง (High)",
   "executive_summary": "สรุปสาระสำคัญเสนอผู้บริหาร: สรุปความเป็นมา, วัตถุประสงค์, โครงสร้างการกำกับดูแล/คู่สัญญา, ขอบเขตนโยบาย, ข้อกำหนดและข้อห้ามสำคัญ โดยระบุข้อเท็จจริงและตัวเลขที่ชัดเจน",
   "legal_analysis": "การกลั่นกรองข้อกฎหมาย ระเบียบ และผลกระทบต่อองค์กร: ฐานอำนาจตามกฎหมายที่ใช้ออกเอกสาร, กฎหมายและระเบียบที่ต้องปฏิบัติตาม, การจัดระดับชั้นความลับ, และจุดเสี่ยง (Red Flags) ที่ต้องระมัดระวังในทางปฏิบัติ",
@@ -120,16 +123,17 @@ async def send_telegram(chat_id: int, text: str):
             await client.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
 
 def extract_text_from_pdf(pdf_bytes: bytes) -> str:
+    """พยายามสกัดข้อความ (กรณีเป็น PDF ดิจิทัล)"""
     try:
         reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
         extracted = []
         for idx, page in enumerate(reader.pages):
             txt = page.extract_text()
-            if txt:
+            if txt and len(txt.strip()) > 0:
                 extracted.append(f"--- หน้า {idx+1} ---\n{txt}")
-        return "\n\n".join(extracted)
+        return "\n\n".join(extracted).strip()
     except Exception as e:
-        return f"Error extracting PDF: {e}"
+        return ""
 
 @app.get("/")
 def root():
@@ -150,7 +154,7 @@ async def telegram_webhook(request: Request):
     if "text" in message:
         text = message["text"].strip()
         if text.startswith("/start"):
-            await send_telegram(chat_id, f"สวัสดีค่ะบอส {user_name}! น้องพร้อมเป็นเลขาคู่ใจและที่ปรึกษากฎหมายให้บอสแล้วนะคะ ส่งเอกสารหรือสั่งงานได้เลยค่ะ ✨")
+            await send_telegram(chat_id, f"สวัสดีค่ะบอส {user_name}! น้องพร้อมเป็นเลขาคู่ใจและที่ปรึกษากฎหมายให้บอสแล้วนะคะ สั่งงาน หรือส่งไฟล์ PDF / รูปถ่ายเข้ามาได้เลยค่ะ ✨")
             return
         if "เตือน" in text or "นัด" in text:
             await send_telegram(chat_id, f"น้องบันทึกนัดหมาย '{text}' ให้แล้วนะคะ ✨")
@@ -161,11 +165,19 @@ async def telegram_webhook(request: Request):
         else:
             await send_telegram(chat_id, f"รับทราบคำสั่งค่ะบอส '{text}' ✨")
 
-    elif "document" in message:
-        doc = message["document"]
-        file_id = doc["file_id"]
-        file_name = doc.get("file_name", "document.pdf")
-        
+    # กรณีส่งไฟล์เอกสาร (PDF, Word, ภาพสแกน)
+    elif "document" in message or "photo" in message:
+        if "document" in message:
+            doc = message["document"]
+            file_id = doc["file_id"]
+            file_name = doc.get("file_name", "document.pdf")
+            mime_type = doc.get("mime_type", "application/pdf")
+        else:
+            photos = message["photo"]
+            file_id = photos[-1]["file_id"]
+            file_name = "photo.jpg"
+            mime_type = "image/jpeg"
+
         await send_telegram(chat_id, f"น้องได้รับเอกสาร <b>'{file_name}'</b> แล้วค่ะ กำลังอ่านข้อความและกลั่นกรองวิเคราะห์ให้อย่างละเอียดนะคะ... ⏳")
 
         file_bytes = None
@@ -177,28 +189,47 @@ async def telegram_webhook(request: Request):
                     f_res = await client.get(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}")
                     file_bytes = f_res.content
             except Exception as e:
-                await send_telegram(chat_id, f"ดาวน์โหลดไฟล์ไม่สำเร็จ: {e}")
+                await send_telegram(chat_id, f"ขออภัยค่ะบอส ดาวน์โหลดไฟล์ไม่สำเร็จ: {e}")
                 return
 
-        # สกัดข้อความภาษาไทยจริงออกจาก PDF ทั้งหมด
-        pdf_text = extract_text_from_pdf(file_bytes) if file_bytes else ""
-        
+        # 1. ตรวจสอบว่าเป็น PDF ที่มีตัวหนังสือ หรือเป็นภาพสแกน
+        pdf_text = ""
+        ext = file_name.lower().split(".")[-1]
+        if ext == "pdf" and file_bytes:
+            pdf_text = extract_text_from_pdf(file_bytes)
+
         report_id = str(uuid.uuid4())[:8]
         title = file_name
-        risk = "ปานกลาง"
-        summary = "ไม่สามารถอ่านเนื้อหาได้"
-        legal = "ไม่มีข้อมูล"
-        actions = "ไม่มีข้อมูล"
+        risk = "ปานกลาง (Medium)"
+        summary = "กำลังประมวลผล..."
+        legal = "กำลังประมวลผล..."
+        actions = "กำลังประมวลผล..."
 
-        if GEMINI_API_KEY and pdf_text:
+        # 2. ส่งให้ Gemini 1.5 Flash วิเคราะห์
+        if GEMINI_API_KEY and file_bytes:
+            headers = {"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"}
+            
+            # กรณีที่ 1: เป็น PDF ดิจิทัล มีข้อความตัวหนังสือชัดเจน
+            if len(pdf_text) > 100:
+                prompt_content = f"{DOCUMENT_ANALYSIS_PROMPT}\n\n[ชื่อไฟล์]: {file_name}\n[เนื้อหาจากเอกสาร]:\n{pdf_text[:50000]}"
+                parts = [{"text": prompt_content}]
+            # กรณีที่ 2: เป็น PDF ภาพสแกน (เช่น ประกาศ กปน.) หรือเป็นไฟล์รูปภาพ ให้ใช้ Gemini Vision อ่าน OCR ทุกหน้าโดยตรง
+            else:
+                actual_mime = "application/pdf" if ext == "pdf" else ("image/jpeg" if ext in ["jpg", "jpeg"] else ("image/png" if ext == "png" else mime_type))
+                b64_data = base64.b64encode(file_bytes).decode("utf-8")
+                prompt_content = f"{DOCUMENT_ANALYSIS_PROMPT}\n\n[ชื่อไฟล์]: {file_name}\nโปรดอ่านข้อความทุกหน้าจากภาพสแกนในเอกสารนี้อย่างละเอียด และจัดทำรายงานสรุปตามเกณฑ์"
+                parts = [
+                    {"inlineData": {"mimeType": actual_mime, "data": b64_data}},
+                    {"text": prompt_content}
+                ]
+
+            payload = {
+                "contents": [{"role": "user", "parts": parts}],
+                "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json"}
+            }
+
             try:
-                headers = {"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"}
-                prompt_content = f"{DOCUMENT_ANALYSIS_PROMPT}\n\n[ชื่อไฟล์]: {file_name}\n[เนื้อหาทั้งหมดจากเอกสาร]:\n{pdf_text[:40000]}"
-                payload = {
-                    "contents": [{"role": "user", "parts": [{"text": prompt_content}]}],
-                    "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json"}
-                }
-                async with httpx.AsyncClient(timeout=90.0) as client:
+                async with httpx.AsyncClient(timeout=120.0) as client:
                     res = await client.post(GEMINI_URL, headers=headers, json=payload)
                     if res.status_code == 200:
                         raw = res.json()['candidates'][0]['content']['parts'][0]['text']
@@ -208,8 +239,10 @@ async def telegram_webhook(request: Request):
                         summary = data.get("executive_summary", summary)
                         legal = data.get("legal_analysis", legal)
                         actions = data.get("action_items", actions)
+                    else:
+                        summary = f"API ตอบกลับสถานะ {res.status_code}: {res.text[:300]}"
             except Exception as e:
-                print(f"[AI ANALYSIS ERROR] {e}")
+                summary = f"เกิดข้อผิดพลาดในการวิเคราะห์ AI: {str(e)}"
 
         rep_data = {
             "id": report_id, "title": title, "filename": file_name,
