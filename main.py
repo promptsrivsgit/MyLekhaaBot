@@ -11,7 +11,6 @@ from handlers.line_handler import handle_line_events
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # เริ่มต้นฐานข้อมูลและลูปติดตามงานอัตโนมัติ
     print("[INIT] Initializing Assistant Database...")
     init_db()
     print("[INIT] Starting Background Scheduler & Chaser Loop...")
@@ -19,23 +18,19 @@ async def lifespan(app: FastAPI):
     yield
     print("[SHUTDOWN] Assistant Bot stopped.")
 
+init_db()
 app = FastAPI(title="YES BOSS AI Assistant & Legal Screener", lifespan=lifespan)
-templates = Jinja2Templates(directory="templates")
+
+# ระบุตำแหน่งโฟลเดอร์หน้าเว็บแบบสมบูรณ์ เพื่อป้องกันไม่ให้เซิร์ฟเวอร์หาไฟล์ไม่เจอ
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 
 @app.get("/")
 def root():
     return {
         "status": "online",
         "service": "YES BOSS AI Assistant & Legal Screener",
-        "version": "1.0.0",
-        "features": [
-            "Executive Secretary Persona",
-            "Persistent Task Chaser (Follow-up until done)",
-            "Legal & Regulatory Document Screening",
-            "Executive 1-Page Summary & Webview Dashboard",
-            "Permanent Memory (Notes, Accounts, Files)",
-            "Morning Briefing (07:30 AM)"
-        ]
+        "version": "1.0.0"
     }
 
 @app.post("/webhook/telegram")
@@ -58,7 +53,12 @@ async def view_report(request: Request, report_id: str):
     report = get_report(report_id)
     if not report:
         raise HTTPException(status_code=404, detail="ไม่พบบันทึกกลั่นกรองเอกสารนี้")
-    return templates.TemplateResponse("report.html", {"request": request, "report": report})
+    try:
+        template = templates.get_template("report.html")
+        html_content = template.render({"request": request, "report": report})
+        return HTMLResponse(content=html_content)
+    except Exception as e:
+        return HTMLResponse(content=f"<h3>เกิดข้อผิดพลาดในการโหลดหน้าเว็บ:</h3><p>{e}</p>", status_code=500)
 
 @app.get("/api/tasks/{user_id}")
 async def get_tasks(user_id: str):
